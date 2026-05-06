@@ -17,10 +17,12 @@ import json
 import sqlite3
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 
+from server.auth import mcp_tool_call_uses_ai, verify
 from server.deps import get_db
 from server.mcp.tools import call_tool, list_tools
+from server.ratelimit import LIMIT_MCP, limiter
 
 router = APIRouter()
 
@@ -29,17 +31,24 @@ SERVER_INFO = {"name": "bt-docker-mcp", "version": "2.0.0"}
 
 
 @router.post("/mcp")
-async def mcp_endpoint(request: Request, db: sqlite3.Connection = Depends(get_db)) -> Any:
+@limiter.limit(LIMIT_MCP)
+async def mcp_endpoint(
+    request: Request,
+    db: sqlite3.Connection = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> Any:
     """JSON-RPC 2.0 entrypoint."""
     try:
         body = await request.json()
     except Exception:
         return _err(None, -32700, "Parse error: invalid JSON")
 
+    auth = (authorization, x_api_key)
     if isinstance(body, list):
         # Batch request
-        return [_handle_one(msg, db) for msg in body]
-    return _handle_one(body, db)
+        return [_handle_one(msg, db, auth=auth) for msg in body]
+    return _handle_one(body, db, auth=auth)
 
 
 @router.get("/mcp")
@@ -57,7 +66,12 @@ def mcp_get_info() -> dict:
 
 # ---------- core dispatcher ----------
 
-def _handle_one(msg: dict, db: sqlite3.Connection) -> dict:
+def _handle_one(msg: dict, db: sqlite3.Connection, auth: tuple[str | None, str | None] | None = None) -> dict:
+    """Dispatch one JSON-RPC message.
+
+    `auth` is the (Authorization, X-API-Key) header tuple from the HTTP
+    transport, or `None` for stdio (local subprocess — gate skipped).
+    """
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return _err(msg.get("id") if isinstance(msg, dict) else None,
                     -32600, "Invalid Request: jsonrpc must be '2.0'")
@@ -89,6 +103,11 @@ def _handle_one(msg: dict, db: sqlite3.Connection) -> dict:
         if not name:
             return _err(msg_id, -32602, "Invalid params: 'name' is required")
         arguments = params.get("arguments") or {}
+        if auth is not None and mcp_tool_call_uses_ai(name, arguments):
+            authorization, x_api_key = auth
+            if not verify(authorization, x_api_key):
+                return _err(msg_id, -32001,
+                            "Authorization required: API password missing or invalid (BTMCP_API_PASSWORD)")
         try:
             result = call_tool(name, arguments, db)
         except ValueError as e:

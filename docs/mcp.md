@@ -292,16 +292,35 @@ Off by default. Set `BTMCP_EXPOSE_ASK=1` on the server to enable.
 
 ## Auth
 
-MCP requests honor the same auth as the REST API:
+MCP requests honor the same auth rule as the REST API: any tool call
+that consumes a server-side AI provider key (OpenAI, Groq) requires a
+shared secret. Pure-data tools stay open.
 
-- **Public read tools** (`search`, `get_chunk`, `passage_lookup`,
-  `entity_lookup`, `tree_listing`): no token required by default.
-  Per-IP rate limiting applies.
-- **`ask`**: when enabled, gated behind `Authorization: Bearer <token>`.
-  Token configured via `BTMCP_BEARER_TOKEN` env var.
+| Tool call | Hits AI key | Auth |
+|---|---|---|
+| `tools/list`, `initialize`, `ping` | no | open (anonymous discovery is fine) |
+| `tools/call` name=`get_chunk` / `passage_lookup` / `entity_lookup` / `tree_listing` | no | open |
+| `tools/call` name=`search` (default — FTS only) | no | open |
+| `tools/call` name=`search` w/ `use_semantic: true` | yes (embedding) | password |
+| `tools/call` name=`ask` (when exposed via `BTMCP_EXPOSE_ASK=1`) | yes (LLM) | password |
 
-Anonymous probing of `tools/list` is allowed — clients need to discover
-what's available before they can choose to authenticate.
+Configure the secret with the `BTMCP_API_PASSWORD` env var on the server.
+If unset/empty the gate is disabled (dev mode); production deployments
+must set it.
+
+Clients pass it on every gated request via either header:
+
+```
+Authorization: Bearer <password>
+X-API-Key: <password>
+```
+
+A failing gated call returns JSON-RPC error code `-32001`
+("Authorization required").
+
+The stdio transport (`python -m server.mcp.stdio`) is local-only and
+skips the gate by design — there's no remote attacker to defend against
+in a subprocess pipe.
 
 ## Client setup examples
 

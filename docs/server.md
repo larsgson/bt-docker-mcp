@@ -1,7 +1,7 @@
 # Backend / server implementation plan
 
 How we will (or are) handling the backend side: a FastAPI service over
-the existing SQLite + sqlite-vec index, deployed on fly.io / Railway,
+the existing SQLite + sqlite-vec index, deployed on Railway,
 fronting the API contract documented in
 [`client-integration.md`](client-integration.md).
 
@@ -23,7 +23,7 @@ existing modules in HTTP handlers, not new logic.
                       │ HTTPS, JSON
                       ↓
          ┌─────────────────────────────────┐
-         │  fly.io  (or Railway)           │
+         │  Railway                        │
          │  api.yourapp.dev                │
          │                                 │
          │  ┌─────────────────────────┐    │
@@ -50,9 +50,9 @@ The split is deliberate:
 
 - **Static frontend on Netlify** — Netlify's strength is serving static
   bundles globally. No SQLite there.
-- **FastAPI on fly.io / Railway** — both support persistent volumes for
-  the SQLite file, plus environment secrets for LLM API keys, plus zero
-  cold-start when machines are kept warm.
+- **FastAPI on Railway** — Railway supports persistent volumes for
+  the SQLite file, environment secrets for LLM API keys, and Dockerfile
+  builds with healthchecks out of the box.
 
 Don't try to put the index inside Netlify Functions: 50 MB bundle limit
 + ephemeral filesystem make it impractical. The index file alone exceeds
@@ -475,22 +475,72 @@ The LLM token stream goes straight to the wire; final validation
 
 ## Auth strategy
 
-Three options, by trust profile:
+The rule: any code path that consumes a server-side AI provider key
+(OpenAI for embeddings, Groq / OpenAI for synthesis) is gated behind a
+shared secret. Read-only deterministic endpoints stay public.
 
-1. **Public, rate-limited.** Most read endpoints (`/api/tree`, `/api/chunk`,
-   `/api/search`) need no auth — content is public anyway. Apply a per-IP
-   rate limit (e.g., `slowapi`) to prevent abuse.
+| Surface | Hits AI provider key | Gate |
+|---|---|---|
+| `GET /api/health` / `/api/chunk/*` / `/api/tree/*` | no | open |
+| `GET /api/search` (default — FTS only) | no | open |
+| `GET /api/search?semantic=true` | yes (OpenAI embeddings) | password |
+| `POST /api/ask` | yes (LLM synthesis) | password |
+| MCP `tools/call` name=`get_chunk` / `passage_lookup` / `entity_lookup` / `tree_listing` | no | open |
+| MCP `tools/call` name=`search` (default) | no | open |
+| MCP `tools/call` name=`search` w/ `use_semantic: true` | yes | password |
+| MCP `tools/call` name=`ask` (when exposed) | yes | password |
 
-2. **Bearer token gate on `/api/ask`.** LLM calls cost money. Gate `/ask`
-   behind a token your frontend embeds. Anyone with the token can use
-   the LLM; revoke / rotate as needed.
+Configure the secret with `BTMCP_API_PASSWORD`. Set it on Railway as a
+service env var; if the variable is unset/empty the gate is disabled
+(useful only for local dev).
 
-3. **Origin allowlist.** Combined with CORS — only requests from your
-   Netlify domains are accepted. Easy bypass via `curl --origin`, but
-   stops casual browser-side abuse.
+Clients pass it on every gated request via either header:
 
-Recommended for v1: **CORS allowlist + per-IP rate limit**, no token. Add
-token if billing pressure shows up.
+```
+Authorization: Bearer <password>
+X-API-Key: <password>
+```
+
+Stdio MCP transport (`python -m server.mcp.stdio`) is local-only and
+skips the gate by design. Origin allowlist + CORS is still enforced
+separately (see below) for browser-side calls.
+
+Implementation: `server/auth.py` defines `verify()`, the FastAPI
+dependency `require_password`, and `mcp_tool_call_uses_ai()` which the
+MCP dispatcher consults before calling tool handlers.
+
+## Rate limiting
+
+Every public endpoint has a per-IP rate limit (slowapi, in-process
+storage). Auth is evaluated first; an unauthorized client gets 401
+without consuming a rate-limit slot.
+
+Defaults — overridable via env vars at process startup:
+
+| Env var | Default | Applies to |
+|---|---|---|
+| `BTMCP_RATE_LIMIT_ASK` | `10/minute` | `POST /api/ask` |
+| `BTMCP_RATE_LIMIT_SEARCH` | `60/minute` | `GET /api/search` |
+| `BTMCP_RATE_LIMIT_READ` | `120/minute` | `/api/health`, `/api/chunk/*`, `/api/tree/*` |
+| `BTMCP_RATE_LIMIT_MCP` | `60/minute` | `POST /mcp` (the JSON-RPC endpoint as a whole) |
+
+Format is slowapi's `<count>/<period>` (period: `second`, `minute`,
+`hour`, `day`). Excess requests get HTTP `429 Too Many Requests`.
+
+Per-IP attribution honors `X-Forwarded-For` so each client gets its own
+bucket behind Railway's load balancer; without that header `request.client.host`
+is used.
+
+Caveat: MCP `tools/call` is rate-limited at the endpoint level, not per
+tool name. An authorized client can spend 60 calls/min total across
+`ask`, `search`, etc. If you need stricter per-tool limits (e.g. 10/min
+for `ask` via MCP too), add the check in `server/mcp/server.py:_handle_one`
+after the auth gate. For v1 the auth gate plus endpoint-level cap is
+the intended trade.
+
+Storage is in-process — single-instance Railway deployment is the
+assumed shape. Horizontal scaling would need a shared backend (Redis);
+see slowapi's `storage_uri` option.
 
 ## CORS
 
@@ -563,63 +613,111 @@ watch this:
 For v1: just read `meta.indexed_at` on each request. fly.io's volume mounts
 make this fast.
 
-## Deployment
+## Deployment (Railway)
 
-### fly.io recipe
+### Files in this repo
 
-```toml
-# fly.toml
-app = "bt-docker-mcp-api"
-primary_region = "ord"
+- `Dockerfile` — single-stage Python 3.12 image; binds `0.0.0.0:${PORT}`,
+  declares `VOLUME ["/data"]`, defaults `INDEX_DB_PATH=/data/index.db`.
+- `railway.toml` — pins build (Dockerfile) and deploy (healthcheck on
+  `/api/health`, restart policy). Railway auto-detects the Dockerfile,
+  but pinning is more reproducible.
 
-[build]
-  dockerfile = "Dockerfile"
+### One-time setup
 
-[env]
-  PORT = "8080"
-  PYTHONUNBUFFERED = "1"
+1. **Create a Railway project from the repo.** New project → Deploy from
+   GitHub → pick `bt-docker-mcp`. Railway picks up `railway.toml` and
+   builds the Dockerfile.
 
-[[mounts]]
-  source = "bt_docker_mcp_data"
-  destination = "/data"
+2. **Add a persistent volume.** Service → Volumes → Add Volume:
+   - mount path: `/data`
+   - size: 1 GB to start (corpus is ~10 MB today; bump as it grows)
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 0
+3. **Set service environment variables.** Required:
+   - `GROQ_API_KEY` — primary synthesis LLM
+   - `OPENAI_API_KEY` — fallback LLM + embeddings
+   - `BTMCP_API_PASSWORD` — shared secret for LLM/embedding endpoints
+     (see [Auth strategy](#auth-strategy))
+   - `CORS_ALLOWED_ORIGINS` — comma-separated allowlist for the browser
+     frontend (e.g. `https://yourapp.netlify.app,https://*.netlify.app`)
+
+   Optional:
+   - `BTMCP_EXPOSE_ASK=1` — list `ask` in MCP `tools/list` (it's still
+     password-gated regardless)
+   - `BTMCP_GROQ_MODEL`, `BTMCP_OPENAI_MODEL`, `BTMCP_EMBEDDING_MODEL` —
+     model overrides; defaults are sensible
+
+   Railway already injects `PORT`; the Dockerfile honors it.
+
+4. **Bootstrap the index** (one-time — see next section).
+
+### Bootstrap (initial index)
+
+The volume starts empty. The HTTP server boots fine but `/api/health`
+reports `status: "uninitialized"` until the index exists. Two ways to
+populate it:
+
+**Option A — build locally, upload to volume.** Fastest. Run on your
+laptop, then push the file:
+```bash
+.venv/bin/python -m ingest.cli --source door43 --source aquifer --book TIT --book RUT
+.venv/bin/python -m indexer.build --source ingest/_staging --reset
+.venv/bin/python -m indexer.embed
+# Upload indexer/index.db → /data/index.db on the Railway volume
+# (Railway dashboard → Volumes → Upload, or `railway volume` CLI)
 ```
 
-Volume holds the SQLite file at `/data/index.db`. Set:
-- `flyctl volumes create bt_docker_mcp_data --size 1` (1 GB; adjust as corpus grows)
-- `flyctl secrets set GROQ_API_KEY=… OPENAI_API_KEY=… CORS_ALLOWED_ORIGINS=…`
-
-Initial data load: ingest + build locally, then `flyctl ssh sftp shell`
-or volume snapshot to copy `index.db` into the volume. Or run ingest
-inside the container itself (set up a cron in fly.io).
-
-### Railway recipe
-
-```dockerfile
-# Dockerfile (existing — needs only updates)
-FROM python:3.12-slim
-WORKDIR /app
-RUN apt-get update && apt-get install -y ca-certificates sqlite3 && rm -rf /var/lib/apt/lists/*
-COPY indexer/requirements.txt ingest/requirements.txt query/requirements.txt server/requirements.txt /app/
-RUN pip install --no-cache-dir \
-    -r indexer/requirements.txt \
-    -r ingest/requirements.txt \
-    -r query/requirements.txt \
-    -r server/requirements.txt
-COPY indexer ingest query server /app/
-ENV INDEX_DB_PATH=/data/index.db
-EXPOSE 8080
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8080"]
+**Option B — build inside the container.** Slower, but no manual upload
+and the same code path the cron will use later:
+```bash
+railway shell             # or: railway run -s <service>
+python -m ingest.cli --source door43 --source aquifer --book TIT --book RUT
+python -m indexer.build --source ingest/_staging --reset
+python -m indexer.embed
 ```
+This runs ingest+build+embed against the live volume. `OPENAI_API_KEY`
+must be set on the service for the embedding step. Subsequent re-runs
+are incremental — `indexer.build` is idempotent and `indexer.embed`
+only embeds chunks without vectors.
 
-Railway env vars: `GROQ_API_KEY`, `OPENAI_API_KEY`, `CORS_ALLOWED_ORIGINS`.
-Mount a Railway volume at `/data`. Same load strategy as fly.io.
+After either option `/api/health` flips to `status: "ok"`.
+
+### Freshness (cron — built, not yet enabled)
+
+`python -m indexer.refresh` runs the same three steps the bootstrap does
+(ingest → build → embed), each one incremental:
+
+- ingest re-pulls upstream into `ingest/_staging` (overwrites)
+- `indexer.build` is idempotent (content-derived doc ids; DELETE+INSERT)
+- `indexer.embed` only embeds chunks that lack a vector
+
+So daily runs cost near-zero unless upstream actually changed something.
+
+Configure the corpus scope via env vars on the cron service (same
+defaults as the current local corpus):
+
+| Env var | Default |
+|---|---|
+| `BTMCP_REFRESH_SOURCES` | `door43 aquifer` (space-separated) |
+| `BTMCP_REFRESH_BOOKS` | `TIT RUT` (space-separated USFM codes) |
+| `BTMCP_REFRESH_LANG` | `en` |
+
+To enable on Railway when ready (no code change required):
+
+1. Same project → **New Service** → "Empty Service" (or duplicate the API
+   service so it inherits the Dockerfile).
+2. Reuse the same `Dockerfile` — point at the repo.
+3. **Service Settings → Cron Schedule**: set a cron expression
+   (e.g. `0 6 * * *` for 06:00 UTC daily).
+4. **Custom Start Command**: `python -m indexer.refresh`
+5. **Volumes**: mount the *same* volume as the API service at `/data`.
+6. **Variables**: set `OPENAI_API_KEY` (required for embed) and any
+   `BTMCP_REFRESH_*` overrides.
+
+Until the cron service exists, the API service runs against whatever
+index was last bootstrapped — no automatic refresh happens. The HTTP
+service picks up file changes automatically once the cron writes a new
+`index.db` (per-request SQLite connections).
 
 ## Eval framework as contract test
 

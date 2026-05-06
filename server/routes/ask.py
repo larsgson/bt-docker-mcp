@@ -4,14 +4,16 @@ from __future__ import annotations
 import sqlite3
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from indexer import citations as citations_mod
 from indexer.db import has_vec
 from query.analyzer import analyze
 from query.retrieve import retrieve
+from server.auth import require_password
 from server.deps import get_db
+from server.ratelimit import LIMIT_ASK, limiter
 from server.resolver import chunk_preview_from_card
 
 router = APIRouter()
@@ -29,8 +31,9 @@ class AskRequest(BaseModel):
     top_k: int = 10
 
 
-@router.post("/ask")
-def ask(req: AskRequest, db: sqlite3.Connection = Depends(get_db)) -> dict:
+@router.post("/ask", dependencies=[Depends(require_password)])
+@limiter.limit(LIMIT_ASK)
+def ask(request: Request, req: AskRequest, db: sqlite3.Connection = Depends(get_db)) -> dict:
     if req.top_k < 1 or req.top_k > 50:
         raise HTTPException(status_code=400, detail="top_k must be 1..50")
 

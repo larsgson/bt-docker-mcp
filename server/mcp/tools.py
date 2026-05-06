@@ -64,7 +64,9 @@ def call_tool(name: str, arguments: dict, db: sqlite3.Connection) -> dict:
         "no API keys required, deterministic. Pass `use_semantic: true` to "
         "additionally enable vector ANN (requires OPENAI_API_KEY on the server "
         "and adds ~150ms per call); useful for paraphrased queries where keyword "
-        "match misses the right chunks."
+        "match misses the right chunks. NOTE: `use_semantic: true` is gated by "
+        "the server-side API password (BTMCP_API_PASSWORD) — pass `Authorization: "
+        "Bearer <password>` or `X-API-Key: <password>` on the MCP HTTP request."
     ),
     input_schema={
         "type": "object",
