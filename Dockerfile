@@ -25,10 +25,14 @@ COPY server  /app/server
 ENV PYTHONUNBUFFERED=1
 ENV INDEX_DB_PATH=/data/index.db
 ENV PORT=8080
-# NOTE: no `VOLUME ["/data"]` directive — Railway rejects it and manages
-# the mount via their own Volumes config (Service → Settings → Volumes,
-# mount path /data). Other platforms (fly.io, plain Docker) configure the
-# same mount externally too, so the directive isn't load-bearing anywhere.
+# Create the mountpoint directory at build time. Originally `VOLUME ["/data"]`
+# did this implicitly, but Railway rejects that directive (mounts come from
+# their Volumes config, not Dockerfile). Without an explicit mkdir, SQLite
+# raises `OperationalError: unable to open database file` on the first
+# request — the /data path simply doesn't exist in the image. Once a Railway
+# volume is attached, it overlays this directory (preserving any files in
+# the volume).
+RUN mkdir -p /data
 EXPOSE 8080
 
 # Default: run the FastAPI HTTP server (REST + MCP).
