@@ -110,7 +110,7 @@ def _search(args: dict, db: sqlite3.Connection) -> dict:
     if args.get("use_semantic") and has_vec(db):
         try:
             from indexer.embed import embed_texts
-            query_vec = embed_texts([q])[0]
+            query_vec = embed_texts([q], input_type="query")[0]
         except Exception:
             pass
 
@@ -348,7 +348,7 @@ def _ask(args: dict, db: sqlite3.Connection) -> dict:
     if has_vec(db):
         try:
             from indexer.embed import embed_texts
-            query_vec = embed_texts([question])[0]
+            query_vec = embed_texts([question], input_type="query")[0]
         except Exception:
             pass
 

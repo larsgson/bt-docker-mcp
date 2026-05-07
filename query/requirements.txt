@@ -1,1 +1,2 @@
 openai>=1.40
+voyageai>=0.2.4    # alt embedding provider (pip-optional; only when BTMCP_EMBEDDING_PROVIDER=voyage)

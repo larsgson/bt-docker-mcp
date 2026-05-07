@@ -13,8 +13,12 @@ from server.cors import allowed_origins
 from server.ratelimit import limiter
 from server.routes import ask as ask_route
 from server.routes import chunks as chunks_route
+from server.routes import concordance as concordance_route
+from server.routes import cross_references as xref_route
+from server.routes import entities as entities_route
 from server.routes import health as health_route
 from server.routes import search as search_route
+from server.routes import topics as topics_route
 from server.routes import trees as trees_route
 from server.mcp import server as mcp_server
 
@@ -44,6 +48,10 @@ app.include_router(chunks_route.router, prefix="/api")
 app.include_router(search_route.router, prefix="/api")
 app.include_router(ask_route.router, prefix="/api")
 app.include_router(trees_route.router, prefix="/api")
+app.include_router(topics_route.router, prefix="/api")
+app.include_router(entities_route.router, prefix="/api")
+app.include_router(xref_route.router, prefix="/api")
+app.include_router(concordance_route.router, prefix="/api")
 
 # MCP surface (mounted at /mcp; not under /api)
 app.include_router(mcp_server.router)

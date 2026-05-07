@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from typing import Callable, Protocol
 
-from . import scripture, source, kind, term, methodology, pericope, aquifer
+from . import (
+    scripture, source, kind, term, methodology, pericope, aquifer,
+    bible, topic, entity, lexicon, morphology, transcript,
+)
 
 
 class TreeBuilder(Protocol):
@@ -18,11 +21,18 @@ class TreeBuilder(Protocol):
 
 
 BUILDERS: dict[str, TreeBuilder] = {
-    "scripture":   scripture,    # type: ignore[dict-item]
-    "source":      source,       # type: ignore[dict-item]
-    "kind":        kind,         # type: ignore[dict-item]
-    "term":        term,         # type: ignore[dict-item]
-    "methodology": methodology,  # type: ignore[dict-item]
-    "pericope":    pericope,     # type: ignore[dict-item]
-    "aquifer":     aquifer,      # type: ignore[dict-item]
+    "scripture":   scripture,     # type: ignore[dict-item]
+    "source":      source,        # type: ignore[dict-item]
+    "kind":        kind,          # type: ignore[dict-item]
+    "term":        term,          # type: ignore[dict-item]
+    "methodology": methodology,   # type: ignore[dict-item]
+    "pericope":    pericope,      # type: ignore[dict-item]
+    "aquifer":     aquifer,       # type: ignore[dict-item]
+    # Stage-2 expansion trees:
+    "bible":       bible,         # type: ignore[dict-item]
+    "topic":       topic,         # type: ignore[dict-item]
+    "entity":      entity,        # type: ignore[dict-item]
+    "lexicon":     lexicon,       # type: ignore[dict-item]
+    "morphology":  morphology,    # type: ignore[dict-item]
+    "transcript":  transcript,    # type: ignore[dict-item]
 }

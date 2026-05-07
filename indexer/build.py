@@ -28,7 +28,7 @@ from indexer.adapters.base import Adapter, Document  # noqa: E402
 from indexer.db import open_db  # noqa: E402
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 DEFAULT_DB = Path(__file__).resolve().parent / "index.db"
 
 
@@ -96,14 +96,15 @@ def main() -> int:
         args.db.unlink()
 
     args.db.parent.mkdir(parents=True, exist_ok=True)
-    fresh = not args.db.exists()
     db = open_db(args.db)
-    if fresh:
-        init_schema(db)
-        db.execute(
-            "INSERT INTO meta(key, value) VALUES (?, ?)",
-            ("schema_version", SCHEMA_VERSION),
-        )
+    # schema.sql is `CREATE … IF NOT EXISTS` throughout, so running it
+    # unconditionally lets additive schema bumps land on existing indexes
+    # without requiring --reset (which would wipe content).
+    init_schema(db)
+    db.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        ("schema_version", SCHEMA_VERSION),
+    )
 
     adapter = select_adapter(args.ext)
     files = sorted(args.source.rglob(f"*.{args.ext}"))
@@ -160,6 +161,57 @@ def main() -> int:
             db.commit()
     except sqlite3.OperationalError:
         pass
+
+    # Route v3 expansion-content chunks into per-kind FTS5 tables, and
+    # purge them from chunks_fts. See schema.sql comment +
+    # docs/expansion-plan.md for the design context. Each per-kind FTS
+    # isolates BM25 stats so the larger expansion corpus doesn't re-rank
+    # v2 retrieval results.
+    #
+    # Add a new entry here + a CREATE VIRTUAL TABLE in schema.sql whenever
+    # a new v3 ingest module lands.
+    V3_KIND_TO_FTS: dict[str, str] = {
+        "kind:lexicon":          "chunks_fts_lexicon",
+        "kind:morphology":       "chunks_fts_morphology",
+        "kind:bible":            "chunks_fts_bible",
+        "kind:section-heading":  "chunks_fts_section_heading",
+        "kind:video-transcript": "chunks_fts_video_transcript",
+        # Pending stage-2 sources — uncomment once their chunks land:
+        # "kind:dictionary":       "chunks_fts_dictionary",
+        # "kind:ane-context":      "chunks_fts_ane_context",
+        # "kind:passage-cluster":  "chunks_fts_passage_cluster",
+    }
+
+    # Per-kind FTS: wipe + bulk-INSERT-FROM-SELECT. A single SQL statement per
+    # FTS table is much faster (and avoids the per-row 'delete' command,
+    # which has caused intermittent FTS5 corruption when run on >10k rows
+    # against external-content tables).
+    for kind_tag, fts_table in V3_KIND_TO_FTS.items():
+        try:
+            db.execute(f"INSERT INTO {fts_table}({fts_table}) VALUES('delete-all')")
+        except sqlite3.OperationalError as e:
+            print(f"  build: skipping {fts_table} ({e}); add it to schema.sql", file=sys.stderr)
+            continue
+        db.execute(
+            f"INSERT INTO {fts_table}(rowid, body) "
+            f"SELECT chunks.rowid, chunks.body FROM chunks "
+            f"JOIN tags ON tags.doc_id = chunks.doc_id WHERE tags.tag = ?",
+            (kind_tag,),
+        )
+
+    # chunks_fts: wipe + repopulate with v2-only content.
+    v3_kinds = list(V3_KIND_TO_FTS.keys())
+    placeholders = ",".join("?" * len(v3_kinds))
+    db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('delete-all')")
+    db.execute(
+        "INSERT INTO chunks_fts(rowid, body) "
+        "SELECT chunks.rowid, chunks.body FROM chunks "
+        "WHERE chunks.doc_id NOT IN ("
+        f" SELECT DISTINCT doc_id FROM tags WHERE tag IN ({placeholders})"
+        ")",
+        v3_kinds,
+    )
+    db.commit()
 
     counts = {
         "documents": db.execute("SELECT COUNT(*) FROM documents").fetchone()[0],

@@ -55,7 +55,7 @@ def search(
             )
         try:
             from indexer.embed import embed_texts
-            query_vec = embed_texts([q])[0]
+            query_vec = embed_texts([q], input_type="query")[0]
         except Exception as e:
             # Embedding failures are non-fatal: degrade to FTS+structured.
             print(f"  search: embed failed ({type(e).__name__}: {e}); proceeding without vec", flush=True)

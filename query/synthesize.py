@@ -26,11 +26,47 @@ if TYPE_CHECKING:
 
 MAX_BODY_CHARS = 1500
 
+# Per-kind body cap. Short content (verses, headings) gets a tight cap so
+# more chunks fit in the prompt; long-form content (term articles, lexicon
+# entries, video transcripts) gets the full default. Anything not in the
+# table falls back to MAX_BODY_CHARS.
+_KIND_BODY_CAPS: dict[str, int] = {
+    "scripture":        500,
+    "bible":            500,
+    "section-heading":  200,
+    "morphology":       600,
+    "question":         800,
+    "translator-note":  800,
+    "study-note":      1200,
+    "term":            1500,
+    "methodology":     1500,
+    "lexicon":         1200,
+    "dictionary":      1500,
+    "ane-context":     1200,
+    "video-transcript":1500,
+    "book-intro":      1200,
+}
 
-SYSTEM_PROMPT = """You answer questions about Bible translation resources using ONLY the SOURCES provided.
 
-The SOURCES are excerpts from a translation-helps corpus. Common types you may see:
-  - ULT/UST: scripture text (Literal Text / Simplified Text)
+def _body_cap_for_kind(kind: str | None) -> int:
+    if not kind:
+        return MAX_BODY_CHARS
+    return _KIND_BODY_CAPS.get(kind, MAX_BODY_CHARS)
+
+
+def _kind_from_tags(tags: list[str]) -> str | None:
+    for t in tags:
+        if t.startswith("kind:"):
+            return t[len("kind:"):]
+    return None
+
+
+SYSTEM_PROMPT = """You answer Bible-translation and Bible-study questions using ONLY the SOURCES provided.
+
+SOURCES come in many shapes — render the answer naturally regardless of which appear:
+
+Door43 translator pair + helps:
+  - ULT/UST: scripture (Literal Text / Simplified Text) — translator-grade English
   - TN: translation notes — explanations, alternate translations, guidance
   - TQ: translation questions WITH their responses — these directly answer
         comprehension questions about the passage
@@ -38,18 +74,39 @@ The SOURCES are excerpts from a translation-helps corpus. Common types you may s
   - TA: translation methodology articles
   - TWL: passage→term link metadata
 
-ALL of these count as valid answers when they speak to the user's question. In
-particular, TQ rows ARE answers — when the user asks "what questions are there
-for X" or asks a comprehension question, surface the TQ rows that match.
+Reader-grade Bible & navigation:
+  - BSB: Berean Standard Bible — full Bible, readable English, Strong's-tagged
+  - Section headings: pericope titles ("The Creation", "The Sermon on the Mount")
+
+Original-language scholarship:
+  - Lexicon: Greek (LSJ, Abbott-Smith) and Hebrew (BDB) entries with definitions,
+            etymology, and citations — keyed by Strong's number
+  - Morphology: verse-level word-by-word parses — original word + lemma +
+                Strong's + parse code + English gloss
+  - Aquifer study notes / FIA materials: editorial commentary
+
+Long-form study:
+  - BibleProject video transcripts: theological/contextual narrative; transcripts
+    may be chunked by timestamp, by Bible reference, or by semantic window —
+    cite from the most relevant strategy
+
+ALL of these count as valid answers when they speak to the user's question. TQ
+rows ARE answers — surface them when the user asks comprehension questions.
+Lexicon entries ARE answers when asked about Greek/Hebrew word meanings. Section
+headings provide pericope context for "what's happening at <passage>" queries.
 
 Hard rules:
 1. Use ONLY the SOURCES — do not bring in outside knowledge or speculate.
-2. Every claim MUST cite at least one chunk_id inline using square brackets, e.g. [56001001:0001].
-3. If the SOURCES truly do not contain anything that speaks to the question
-   (not even a tangentially related TN, TW, TQ, or TA), set "answer" to:
+2. Every claim MUST cite at least one provenance id inline using square brackets,
+   e.g. [56001001:0001] for a chunk; future answers may also cite [entity:<id>],
+   [topic:<id>], or [lexicon:<strongs>] when those forms appear in SOURCES.
+3. When citing a Greek/Hebrew word, give both the original-script form and an
+   English transliteration if the SOURCES include them.
+4. If the SOURCES truly do not contain anything that speaks to the question,
+   set "answer" to:
    "I don't see an answer to that in the indexed sources."
    and "citations" to the chunk_ids of the closest related sources.
-4. Be concise. No preamble, no meta-commentary, no opinions.
+5. Be concise. No preamble, no meta-commentary, no opinions.
 
 Reply with a single JSON object only:
 {
@@ -69,14 +126,19 @@ Reply only with the JSON object specified."""
 
 
 def _format_sources(cards: list["CitationCard"], bodies: dict[str, str]) -> str:
-    """Render SOURCES block with FULL chunk bodies (capped) — not the 240-char display excerpt."""
+    """Render SOURCES block with FULL chunk bodies (per-kind capped) — not
+    the 240-char display excerpt. Per-kind caps tighten the prompt: a verse
+    needs ~50 chars, a lexicon entry can use up to 1200, a section heading
+    is just the title."""
     blocks = []
     for c in cards:
         passage = c.passage or "no passage"
         body = bodies.get(c.chunk_id) or c.excerpt
-        if len(body) > MAX_BODY_CHARS:
-            body = body[:MAX_BODY_CHARS].rstrip() + "…"
-        blocks.append(f"[{c.chunk_id}] {c.document_title} — {passage}\n  {body}")
+        kind = _kind_from_tags(c.tags)
+        cap = _body_cap_for_kind(kind)
+        if len(body) > cap:
+            body = body[:cap].rstrip() + "…"
+        blocks.append(f"[{c.provenance_id}] {c.document_title} — {passage}\n  {body}")
     return "\n\n".join(blocks)
 
 
@@ -96,10 +158,43 @@ def _extract_inline_citations(answer: str) -> list[str]:
     return re.findall(r"\[([A-Za-z0-9:_\-]+)\]", answer)
 
 
+def _intent_context_for(analysis) -> str | None:
+    """Build the optional one-liner that explains *why* the chunks were
+    retrieved. Used for stage-3 intents where the connection between query
+    and chunks isn't obvious from the chunk bodies alone (Nave's groups
+    Bible verses by *story*, not vocabulary; xrefs anchor to a source verse;
+    word-study chunks are lexicon entries that may need framing)."""
+    if analysis is None:
+        return None
+    intent = getattr(analysis, "intent", None)
+    if intent == "topic" and getattr(analysis, "topic_query", None):
+        topic = analysis.topic_query
+        return f"Nave's Topical Bible groups the following Bible verses under '{topic}'"
+    if intent == "xref" and getattr(analysis, "xref_source", None):
+        bb = analysis.xref_source
+        try:
+            from indexer.references import human
+            ref = human(bb, bb)
+            return f"TSK + BSB-parallel cross-references for {ref}"
+        except Exception:
+            return f"Cross-references for BBCCCVVV {bb}"
+    if intent == "genealogy" and getattr(analysis, "entity_query", None):
+        eq = analysis.entity_query
+        rel = (eq.get("relation") or "").replace("-rev", "")
+        name = eq.get("name", "?")
+        return f"Entity-graph traversal: {rel} of {name} (with surrounding context)"
+    if intent == "word_study":
+        return "Lexicon entries (LSJ / Abbott-Smith / BDB) for the queried word"
+    return None
+
+
 def synthesize(
     question: str,
     cards: list["CitationCard"],
     db: sqlite3.Connection | None = None,
+    *,
+    intent_context: str | None = None,
+    analysis=None,
 ) -> dict:
     """Return {answer, citations, confidence, raw}.
 
@@ -107,7 +202,13 @@ def synthesize(
     LLM prompt (instead of the truncated 240-char display excerpts).
     `citations` is the validated union of inline-cited and explicitly-listed
     chunk_ids that actually exist in `cards`. Hallucinated ids are dropped.
+
+    `intent_context` is an optional one-line prefix prepended to the SOURCES
+    block — used by stage-3 intents that need to tell the LLM why the chunks
+    are relevant. If not given but `analysis` is, derived automatically.
     """
+    if intent_context is None and analysis is not None:
+        intent_context = _intent_context_for(analysis)
     if not cards:
         # Use the same phrase the LLM is instructed to emit in its refusal exit,
         # so the eval's refusal regex catches both paths uniformly.
@@ -118,9 +219,12 @@ def synthesize(
             "raw": None,
         }
 
-    valid_ids = {c.chunk_id for c in cards}
+    valid_ids = {c.provenance_id for c in cards}
     bodies = _fetch_bodies(db, [c.chunk_id for c in cards])
-    user = USER_TEMPLATE.format(sources=_format_sources(cards, bodies), question=question)
+    sources_block = _format_sources(cards, bodies)
+    if intent_context:
+        sources_block = f"({intent_context})\n\n{sources_block}"
+    user = USER_TEMPLATE.format(sources=sources_block, question=question)
 
     raw = chat_completion(system=SYSTEM_PROMPT, user=user, response_format="json")
 

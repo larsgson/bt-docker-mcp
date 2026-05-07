@@ -6,6 +6,13 @@ table, and what we chose with the reasoning. Useful when reverting feels
 tempting, or when extending the system in a way that pressures one of
 these decisions.
 
+> **Forward-looking work.** The next planned phase (corpus expansion,
+> generalized provenance ids, entity graph, multi-strategy chunking) is
+> tracked separately in [`expansion-plan.md`](expansion-plan.md), with
+> the supporting comparison reads in
+> [`comparisons/`](comparisons/). The decisions below remain
+> load-bearing under that plan; nothing in the plan reverses them.
+
 ## 1. Two-layer architecture (Layer 1 = index, Layer 2 = query)
 
 **Problem.** Should the system be one big request handler, or split?

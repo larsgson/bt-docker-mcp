@@ -78,7 +78,7 @@ def main() -> int:
         try:
             db.execute("SELECT count(*) FROM chunks_vec LIMIT 1")
             from indexer.embed import embed_texts  # lazy import (requires openai SDK)
-            query_vec = embed_texts([args.question])[0]
+            query_vec = embed_texts([args.question], input_type="query")[0]
         except sqlite3.OperationalError:
             # chunks_vec doesn't exist yet — user hasn't run indexer.embed
             pass

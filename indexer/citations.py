@@ -1,13 +1,32 @@
-"""Resolve a chunk_id back to a user-facing CitationCard.
+"""Resolve a provenance reference back to a user-facing CitationCard.
 
 Cards are what the UI shows. Every claim in an answer carries one card so
 the user can see exactly which source backs it.
+
+Provenance ids
+--------------
+A provenance id is the stable string the LLM cites and the validator
+checks. Today the system has one kind: `chunk` — bare chunk ids like
+``"56001001:0001"``. Stage 1 of the expansion plan introduces the
+generalized form so future content (entities, lexicon entries, graph
+relations) cites uniformly:
+
+  chunk:<chunk_id>           (bare ``<chunk_id>`` is also accepted today)
+  entity:<entity_id>
+  lexicon:<lexicon_id>
+  relation:<source>:<rel>:<target>
+
+For chunk-based cards the field equals the chunk_id (no ``chunk:``
+prefix), preserving the existing wire format. Non-chunk provenance kinds
+are namespaced so chunk_ids and entity_ids can never collide.
+
+See docs/expansion-plan.md for the design context.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import references
@@ -25,6 +44,11 @@ class CitationCard:
     source: str                # source_path of the document
     excerpt: str               # body trimmed to EXCERPT_LEN chars
     metadata: dict             # the document's full metadata dict
+    provenance_id: str = ""    # validated against LLM citations; defaults to chunk_id
+
+    def __post_init__(self) -> None:
+        if not self.provenance_id:
+            self.provenance_id = self.chunk_id
 
     def asdict(self) -> dict:
         return asdict(self)
@@ -75,6 +99,7 @@ def resolve(db: sqlite3.Connection, chunk_id: str) -> CitationCard | None:
         source=source_path,
         excerpt=_trim(body),
         metadata=meta,
+        provenance_id=chunk_id,
     )
 
 

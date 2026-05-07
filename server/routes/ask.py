@@ -45,7 +45,7 @@ def ask(request: Request, req: AskRequest, db: sqlite3.Connection = Depends(get_
     if has_vec(db):
         try:
             from indexer.embed import embed_texts
-            query_vec = embed_texts([req.question])[0]
+            query_vec = embed_texts([req.question], input_type="query")[0]
         except Exception as e:
             print(f"  ask: embed failed ({type(e).__name__}: {e}); proceeding without vec", flush=True)
 
@@ -54,7 +54,7 @@ def ask(request: Request, req: AskRequest, db: sqlite3.Connection = Depends(get_
     cards = citations_mod.resolve_many(db, [h.chunk_id for h in hits])
 
     from query.synthesize import synthesize  # lazy: pulls openai SDK
-    synth = synthesize(req.question, cards, db=db)
+    synth = synthesize(req.question, cards, db=db, analysis=analysis)
 
     by_id = {c.chunk_id: c for c in cards}
     citations_out: list[dict] = []

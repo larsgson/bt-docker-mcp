@@ -5,14 +5,30 @@
   python3 -m indexer.embed --reset-vec    # drop chunks_vec then re-embed everything
 
 Used at *both* index-build time (this CLI) and query time
-(`embed_texts([question])` in `query/ask.py`).
+(`embed_texts([question])` in `query/ask.py` and `/api/search`,`/api/ask`).
 
-Default provider: OpenAI `text-embedding-3-small` (1536 dim, cosine).
-Override via env vars:
-  OPENAI_API_KEY              required
+Providers
+---------
+Provider is auto-detected from `BTMCP_EMBEDDING_MODEL` (override via
+`BTMCP_EMBEDDING_PROVIDER`):
+
+  * `text-embedding-*`  → OpenAI (default)
+  * `voyage-*`          → Voyage AI
+
+Voyage requires `pip install voyageai` + `VOYAGE_API_KEY`.
+OpenAI requires `OPENAI_API_KEY`.
+
+Configuration env vars (all optional, sane defaults):
+
   BTMCP_EMBEDDING_MODEL       default: text-embedding-3-small
-  BTMCP_EMBEDDING_DIM         default: 1536
+                              recommended for new builds: voyage-3-large
+  BTMCP_EMBEDDING_DIM         default: per-model (see _DEFAULT_DIMS below)
   BTMCP_EMBEDDING_BATCH_SIZE  default: 100
+  BTMCP_EMBEDDING_PROVIDER    optional: 'openai' | 'voyage' — explicit override
+
+Switching models / providers requires re-embedding (`--reset-vec`); the
+schema check enforces this so the index never carries vectors from
+mixed providers.
 """
 from __future__ import annotations
 
@@ -22,20 +38,60 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Iterable, Literal
+
+# Per-model default dimension. Override via BTMCP_EMBEDDING_DIM.
+_DEFAULT_DIMS: dict[str, int] = {
+    # OpenAI
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+    # Voyage AI
+    "voyage-3-large": 1024,
+    "voyage-3-lite": 512,
+    "voyage-3":      1024,
+    "voyage-2":      1024,
+}
 
 EMBEDDING_MODEL = os.environ.get("BTMCP_EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIM = int(os.environ.get("BTMCP_EMBEDDING_DIM", "1536"))
+EMBEDDING_DIM = int(
+    os.environ.get("BTMCP_EMBEDDING_DIM")
+    or _DEFAULT_DIMS.get(EMBEDDING_MODEL, 1536)
+)
 EMBEDDING_BATCH = int(os.environ.get("BTMCP_EMBEDDING_BATCH_SIZE", "100"))
 
 DEFAULT_DB = Path(__file__).resolve().parent / "index.db"
 
+InputType = Literal["document", "query"]
 
-def _client():
+
+# ---------- provider detection ----------
+
+def _detect_provider(model: str) -> str:
+    explicit = (os.environ.get("BTMCP_EMBEDDING_PROVIDER") or "").strip().lower()
+    if explicit:
+        return explicit
+    if model.startswith("voyage"):
+        return "voyage"
+    if model.startswith("text-embedding") or model.startswith("ada-"):
+        return "openai"
+    raise RuntimeError(
+        f"cannot detect provider for embedding model {model!r}; "
+        f"set BTMCP_EMBEDDING_PROVIDER to 'openai' or 'voyage'"
+    )
+
+
+PROVIDER = _detect_provider(EMBEDDING_MODEL)
+
+
+# ---------- OpenAI provider ----------
+
+def _openai_client():
     from openai import OpenAI
 
     key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not key:
-        raise RuntimeError("OPENAI_API_KEY required for embeddings")
+        raise RuntimeError("OPENAI_API_KEY required for OpenAI embeddings")
     try:
         key.encode("ascii")
     except UnicodeEncodeError as e:
@@ -46,12 +102,64 @@ def _client():
     return OpenAI(api_key=key)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Batch-embed via OpenAI. Order-preserving."""
+def _embed_openai(texts: list[str]) -> list[list[float]]:
+    resp = _openai_client().embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    return [e.embedding for e in resp.data]
+
+
+# ---------- Voyage AI provider ----------
+
+def _voyage_client():
+    try:
+        import voyageai  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "voyageai not installed; pip install voyageai or remove BTMCP_EMBEDDING_PROVIDER=voyage"
+        ) from e
+    key = (os.environ.get("VOYAGE_API_KEY") or "").strip()
+    if not key:
+        raise RuntimeError("VOYAGE_API_KEY required for Voyage embeddings")
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError as e:
+        raise RuntimeError(
+            f"VOYAGE_API_KEY contains non-ASCII char {key[e.start:e.end]!r} at position {e.start}; "
+            f"re-copy from a plain-text source"
+        ) from None
+    return voyageai.Client(api_key=key)
+
+
+def _embed_voyage(texts: list[str], input_type: InputType) -> list[list[float]]:
+    """Voyage's `input_type` distinguishes document vs query embeddings — small
+    but real recall lift on retrieval. We pass it through whenever the caller
+    knows which side they're on; default 'document' for ingest paths."""
+    client = _voyage_client()
+    # output_dimension is optional for voyage-3-large (Matryoshka). We only
+    # set it if the user picked a non-default dim.
+    kwargs: dict = {"model": EMBEDDING_MODEL, "input_type": input_type}
+    default_dim = _DEFAULT_DIMS.get(EMBEDDING_MODEL)
+    if default_dim is not None and EMBEDDING_DIM != default_dim:
+        kwargs["output_dimension"] = EMBEDDING_DIM
+    result = client.embed(texts, **kwargs)
+    return result.embeddings  # type: ignore[no-any-return]
+
+
+# ---------- public API ----------
+
+def embed_texts(texts: list[str], *, input_type: InputType = "document") -> list[list[float]]:
+    """Batch-embed a list of strings. Order-preserving.
+
+    `input_type` is honored by Voyage (asymmetric retrieval); OpenAI ignores
+    it. Pass `input_type='query'` from search/ask call sites for better
+    Voyage recall once you switch providers.
+    """
     if not texts:
         return []
-    resp = _client().embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return [e.embedding for e in resp.data]
+    if PROVIDER == "voyage":
+        return _embed_voyage(texts, input_type)
+    if PROVIDER == "openai":
+        return _embed_openai(texts)
+    raise RuntimeError(f"unknown embedding provider: {PROVIDER!r}")
 
 
 def serialize_vector(vec: list[float]) -> bytes:
@@ -108,7 +216,7 @@ def embed_all_chunks(db: sqlite3.Connection, *, batch_size: int = EMBEDDING_BATC
     total = len(rows)
     for i in range(0, total, batch_size):
         batch = rows[i : i + batch_size]
-        # Drop rows with empty bodies — OpenAI rejects empty inputs; their
+        # Drop rows with empty bodies — providers reject empty inputs; their
         # absence from chunks_vec just means vector retrieval can't surface them.
         items = [(cid, body) for cid, body in batch if body and body.strip()]
         skipped += len(batch) - len(items)
@@ -116,7 +224,7 @@ def embed_all_chunks(db: sqlite3.Connection, *, batch_size: int = EMBEDDING_BATC
             continue
         ids = [it[0] for it in items]
         bodies = [it[1] for it in items]
-        vectors = embed_texts(bodies)
+        vectors = embed_texts(bodies, input_type="document")
         params = [(cid, serialize_vector(v)) for cid, v in zip(ids, vectors)]
         db.executemany("INSERT INTO chunks_vec(chunk_id, embedding) VALUES (?, ?)", params)
         db.commit()
@@ -125,13 +233,16 @@ def embed_all_chunks(db: sqlite3.Connection, *, batch_size: int = EMBEDDING_BATC
 
     db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("embedding_model", EMBEDDING_MODEL))
     db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("embedding_dim", str(EMBEDDING_DIM)))
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", ("embedding_provider", PROVIDER))
     db.commit()
     return {"embedded": embedded, "skipped_empty": skipped, "candidate_total": total}
 
 
 def reset_vec(db: sqlite3.Connection) -> None:
     db.execute("DROP TABLE IF EXISTS chunks_vec")
-    db.execute("DELETE FROM meta WHERE key IN ('embedding_model', 'embedding_dim')")
+    db.execute(
+        "DELETE FROM meta WHERE key IN ('embedding_model', 'embedding_dim', 'embedding_provider')"
+    )
     db.commit()
 
 
@@ -164,6 +275,7 @@ def main() -> int:
     result["db"] = str(args.db)
     result["model"] = EMBEDDING_MODEL
     result["dim"] = EMBEDDING_DIM
+    result["provider"] = PROVIDER
     print(json.dumps(result, indent=2))
     return 0
 

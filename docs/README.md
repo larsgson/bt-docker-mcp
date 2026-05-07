@@ -17,7 +17,7 @@ If you're new, read in this order. Each builds on the one before.
 | **3. [query-pipeline.md](query-pipeline.md)** | Layer 2 — analyzer, six retrievers, RRF, intent weights, synthesis, citations | When you change how questions become answers |
 | **4. [eval.md](eval.md)** | Eval set format, runner, metrics, output | When tuning retrieval or synthesis quality |
 | **5. [decisions.md](decisions.md)** | Design decisions chronicled with the *why* | When you need to understand why something is the way it is — or when reverting feels tempting |
-| **6. [client-integration.md](client-integration.md)** | API contract + tree URL scheme + integration guide | When building a frontend (Netlify-hosted React/Astro/SvelteKit) against the backend API |
+| **6. [client-integration.md](client-integration.md)** | API contract + 12-tree URL scheme + lookup views (xrefs, topics, entities, concordance) + frontend implementation patterns | When building a frontend (Netlify-hosted React/Astro/SvelteKit) against the backend API |
 | **7. [server.md](server.md)** | Backend implementation plan (FastAPI, deployment, route handlers) | When implementing or modifying the HTTP layer that fronts the index |
 
 ## At a glance
@@ -48,6 +48,19 @@ If you're new, read in this order. Each builds on the one before.
 
 The right-hand column is the actual repo path that owns each piece. Layer 1 is
 data infrastructure; Layer 2 is the conversation surface.
+
+## Comparisons against neighbouring projects
+
+When considering whether to borrow a pattern from one of the projects in
+`examples/`, start here — these capture the architectural deltas plus
+the load-bearing invariants each pattern would pressure.
+
+- [`comparisons/bible-study-assistant.md`](comparisons/bible-study-assistant.md) — RAG + conversational UX over a larger corpus
+- [`comparisons/studybible-mcp.md`](comparisons/studybible-mcp.md) — pure-tool MCP server with zero server-side LLM; reference library shape
+
+## Forward-looking
+
+- [`expansion-plan.md`](expansion-plan.md) — planned next phase that absorbs the borrow-worthy ideas from the comparisons (lexicons + morphology + ANE context + entity graph + multi-strategy chunking) without pressuring our load-bearing invariants
 
 ## See also
 

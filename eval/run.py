@@ -149,7 +149,7 @@ def evaluate_case(
     if use_vec:
         try:
             from indexer.embed import embed_texts
-            query_vec = embed_texts([question])[0]
+            query_vec = embed_texts([question], input_type="query")[0]
         except Exception as e:
             embed_error = f"{type(e).__name__}: {e}"
 
@@ -168,7 +168,7 @@ def evaluate_case(
     if not no_llm:
         try:
             from query.synthesize import synthesize
-            synth = synthesize(question, cards, db=db)
+            synth = synthesize(question, cards, db=db, analysis=analysis)
             answer_text = synth["answer"]
             citations = synth["citations"]
             confidence = synth["confidence"]
