@@ -25,7 +25,10 @@ COPY server  /app/server
 ENV PYTHONUNBUFFERED=1
 ENV INDEX_DB_PATH=/data/index.db
 ENV PORT=8080
-VOLUME ["/data"]
+# NOTE: no `VOLUME ["/data"]` directive — Railway rejects it and manages
+# the mount via their own Volumes config (Service → Settings → Volumes,
+# mount path /data). Other platforms (fly.io, plain Docker) configure the
+# same mount externally too, so the directive isn't load-bearing anywhere.
 EXPOSE 8080
 
 # Default: run the FastAPI HTTP server (REST + MCP).
