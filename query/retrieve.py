@@ -836,10 +836,14 @@ _INTENT_WEIGHTS: dict[str, list[float]] = {
     # Note: Voyage embeddings (post-stage-3) lift TN/Aquifer recall for
     # thematic queries; nudge scripture weight up so verse text doesn't get
     # displaced when the user asks a paraphrased narrative question.
-    "thematic":         [1.0, 0.5, 1.0, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "entity_lookup":    [1.0, 2.5, 0.8, 0.8, 1.5, 1.0,  0.0, 0.0, 0.5, 0.0, 0.0, 0.0],
-    "passage_specific": [1.0, 0.6, 1.2, 1.5, 1.0, 1.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.5],
-    "passage_book":     [1.0, 0.6, 1.1, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    # `bible` (BSB) carries weight on every Bible-shaped intent: Door43's
+    # kind:scripture only covers Titus + Ruth, so BSB is the only full-Bible
+    # text source for the other 64 books. Without this, "John 3:16" and
+    # thematic queries like "light of the world" return 0 BSB hits.
+    "thematic":         [1.0, 0.5, 1.0, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    "entity_lookup":    [1.0, 2.5, 0.8, 0.8, 1.5, 1.0,  0.0, 0.0, 0.5, 0.5, 0.0, 0.0],
+    "passage_specific": [1.0, 0.6, 1.2, 1.5, 1.0, 1.0,  0.0, 0.0, 0.0, 1.5, 0.0, 0.5],
+    "passage_book":     [1.0, 0.6, 1.1, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 1.4, 0.0, 0.0],
     "methodology":      [1.0, 1.5, 1.0, 0.8, 1.0, 1.2,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     # v3 intents — corresponding new retrievers high, v2 retrievers low
     "word_study":       [0.3, 0.5, 0.0, 0.0, 0.5, 0.5,  3.0, 1.5, 0.0, 0.0, 0.0, 0.0],
