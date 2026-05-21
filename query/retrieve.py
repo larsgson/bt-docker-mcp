@@ -658,15 +658,57 @@ def entity_search(
     return [Hit(chunk_id=cid, score=score, retrievers=["entity"]) for cid, score in ranked]
 
 
+def _consolidate_bible_hits(
+    db: sqlite3.Connection,
+    hits: dict[str, float],
+    gap: int = 2,
+) -> list[Hit]:
+    """Merge adjacent BSB verse hits into passage-level hits.
+
+    Verses within `gap` BBCCCVVV of each other are grouped together.
+    The group keeps the best score and the first chunk_id as representative.
+    """
+    placeholders = ",".join("?" * len(hits))
+    rows = db.execute(
+        f"SELECT chunks.id, passage_refs.start_bbcccvvv "
+        f"FROM chunks "
+        f"JOIN passage_refs ON passage_refs.doc_id = chunks.doc_id "
+        f"WHERE chunks.id IN ({placeholders}) "
+        f"ORDER BY passage_refs.start_bbcccvvv",
+        list(hits.keys()),
+    ).fetchall()
+
+    if not rows:
+        ranked = sorted(hits.items(), key=lambda kv: kv[1], reverse=True)
+        return [Hit(chunk_id=cid, score=s, retrievers=["bible"]) for cid, s in ranked]
+
+    groups: list[tuple[str, float]] = []
+    grp_cid, grp_score, prev_bb = rows[0][0], hits[rows[0][0]], rows[0][1]
+
+    for cid, bb in rows[1:]:
+        if bb - prev_bb <= gap:
+            if hits[cid] > grp_score:
+                grp_score = hits[cid]
+                grp_cid = cid
+        else:
+            groups.append((grp_cid, grp_score))
+            grp_cid, grp_score = cid, hits[cid]
+        prev_bb = bb
+
+    groups.append((grp_cid, grp_score))
+    groups.sort(key=lambda kv: kv[1], reverse=True)
+    return [Hit(chunk_id=cid, score=score, retrievers=["bible"]) for cid, score in groups]
+
+
 def bible_search(
     db: sqlite3.Connection,
     *,
     fts_query: str,
     passages: list[tuple[int, int]],
-    limit: int = 50,
+    limit: int = 15,
 ) -> list[Hit]:
-    """FTS over chunks_fts_bible (BSB) + passage filter. Returns BSB scripture
-    chunks for the user-facing 'show me the Bible verse' use case."""
+    """FTS over chunks_fts_bible (BSB) + passage filter, with adjacent-verse
+    consolidation so multiple nearby verses merge into one passage-level hit."""
     hits: dict[str, float] = {}
 
     if passages:
@@ -700,8 +742,10 @@ def bible_search(
         except sqlite3.OperationalError as e:
             print(f"bible_search: FTS5 skipped ({e!r})", flush=True)
 
-    ranked = sorted(hits.items(), key=lambda kv: kv[1], reverse=True)
-    return [Hit(chunk_id=cid, score=score, retrievers=["bible"]) for cid, score in ranked]
+    if not hits:
+        return []
+
+    return _consolidate_bible_hits(db, hits)
 
 
 def topic_search(
@@ -836,14 +880,14 @@ _INTENT_WEIGHTS: dict[str, list[float]] = {
     # Note: Voyage embeddings (post-stage-3) lift TN/Aquifer recall for
     # thematic queries; nudge scripture weight up so verse text doesn't get
     # displaced when the user asks a paraphrased narrative question.
-    # `bible` (BSB) carries weight on every Bible-shaped intent: Door43's
-    # kind:scripture only covers Titus + Ruth, so BSB is the only full-Bible
-    # text source for the other 64 books. Without this, "John 3:16" and
-    # thematic queries like "light of the world" return 0 BSB hits.
-    "thematic":         [1.0, 0.5, 1.0, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    # `bible` (BSB) carries modest weight on Bible-shaped intents so raw
+    # verse text supplements but doesn't crowd out explanatory resources.
+    # bible_search consolidates adjacent verses into passage-level hits
+    # to further reduce slot flooding in the top-K.
+    "thematic":         [1.0, 0.5, 1.0, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
     "entity_lookup":    [1.0, 2.5, 0.8, 0.8, 1.5, 1.0,  0.0, 0.0, 0.5, 0.5, 0.0, 0.0],
-    "passage_specific": [1.0, 0.6, 1.2, 1.5, 1.0, 1.0,  0.0, 0.0, 0.0, 1.5, 0.0, 0.5],
-    "passage_book":     [1.0, 0.6, 1.1, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 1.4, 0.0, 0.0],
+    "passage_specific": [1.0, 0.6, 1.2, 1.5, 1.0, 1.0,  0.0, 0.0, 0.0, 0.5, 0.0, 0.5],
+    "passage_book":     [1.0, 0.6, 1.1, 1.4, 1.0, 1.0,  0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
     "methodology":      [1.0, 1.5, 1.0, 0.8, 1.0, 1.2,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     # v3 intents — corresponding new retrievers high, v2 retrievers low
     "word_study":       [0.3, 0.5, 0.0, 0.0, 0.5, 0.5,  3.0, 1.5, 0.0, 0.0, 0.0, 0.0],
